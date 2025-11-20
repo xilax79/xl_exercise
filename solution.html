@@ -1,0 +1,172 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Uploading Big Files (AWS)</title>
+    <style>
+        :root {
+            --font-family-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+            --color-text: #333;
+            --color-primary: #005fcc;
+            --color-bg: #ffffff;
+            --color-bg-alt: #f8f9fa;
+            --color-border: #dee2e6;
+            --color-quote-bg: #e9ecef;
+            --color-quote-border: #6c757d;
+        }
+        body {
+            font-family: var(--font-family-sans);
+            line-height: 1.7;
+            color: var(--color-text);
+            background-color: var(--color-bg);
+            margin: 0;
+            padding: 2rem;
+        }
+        main {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        h1, h3, h4, h5 {
+            font-weight: 600;
+            color: var(--color-primary);
+            margin-top: 2.5em;
+            margin-bottom: 1em;
+        }
+        h1 {
+            font-size: 2.5rem;
+            text-align: center;
+            border-bottom: 2px solid var(--color-border);
+            padding-bottom: 0.5em;
+            margin-top: 0;
+        }
+        h3 {
+            font-size: 1.75rem;
+            border-bottom: 1px solid var(--color-border);
+            padding-bottom: 0.3em;
+        }
+        h4 {
+            font-size: 1.25rem;
+            color: #343a40;
+            margin-bottom: 1.5em;
+            margin-top: 2em;
+        }
+        h5 {
+            font-size: 1.1rem;
+            color: #495057;
+            margin-top: 2em;
+        }
+        p, ul, ol {
+            margin-bottom: 1em;
+            font-size: 1.05rem;
+        }
+        ul, ol {
+            padding-left: 25px;
+        }
+        li {
+            margin-bottom: 0.75em;
+        }
+        strong {
+            color: #212529;
+        }
+        img {
+            max-width: 100%;
+            height: auto;
+            display: block;
+            margin: 0 auto 2em auto;
+            border-radius: 8px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.08);
+            border: 1px solid var(--color-border);
+        }
+        blockquote {
+            background-color: var(--color-quote-bg);
+            border-left: 5px solid var(--color-quote-border);
+            margin: 2em 0;
+            padding: 1em 1.5em;
+            color: #495057;
+        }
+        blockquote p {
+            margin: 0;
+            font-style: italic;
+        }
+        .section-break {
+            margin-top: 4rem;
+        }
+    </style>
+</head>
+<body>
+    <main>
+        <h1>Uploading Big Files (AWS)</h1>
+
+        <h3 class="section-break">1. Problem statement</h3>
+        <blockquote>
+            <p>You just joined a project and they are experiencing an issue with file uploads. The product has a functionality where users can upload images, which is currently implemented by having the user upload the file directly to the backend, which runs inside a basic EC2 machine, where it is then uploaded to Amazon S3. As of late they have had to restart the backend multiple times since it keeps increasing disk swap space. The client has told you that a couple of weeks ago they released a feature which allows users to upload videos, and they have reused their implementation for images. Describe briefly what you think the issue is. Feel free to make any assumptions you need to, but make sure to document them in your solution.</p>
+            <p>How would you solve the issue?</p>
+            <p>For background video processing, would you recommend Celery, RQ, or async/await? Justify your choice considering scalability and complexity, and explain what design patterns you would apply to make this system maintainable and extensible based on your technology choice.</p>
+        </blockquote>
+
+        <h3 class="section-break">2. Analysis of the current architecture</h3>
+        <h4>Current workflow</h4>
+        <p>The diagram below shows the inefficient and tightly-coupled workflow of the current system.</p>
+        <img src="assets/Current Workflow.png" alt="Diagram of the current, problematic workflow">
+        <ol>
+            <li>A user initiates an upload via HTTP request to the backend EC2 instance.</li>
+            <li>The backend server receives and buffers the entire file in memory or local disk.</li>
+            <li>Once fully received, the backend process sends the file to the Amazon S3 bucket.</li>
+            <li>The backend server finally responds to the user after the entire process is complete.</li>
+        </ol>
+        
+        <h4>Why this architecture fails</h4>
+        <p>While this approach is acceptable for small files, it could fail with large video files for the following reasons:</p>
+        <ul>
+            <li><strong>Memory and disk exhaustion:</strong> An EC2 instance has limited RAM and a few concurrent video uploads can easily consume all of it, forcing the OS to use swap space heavily. This leads to a performance drop that can crash the application process or the entire server.</li>
+            <li><strong>Scalability bottleneck:</strong> The backend server becomes the single bottleneck for all uploads. Its capacity is limited by its own network I/O and memory, not the highly scalable infrastructure of S3.</li>
+            <li><strong>Poor user experience:</strong> This two-step flow (User → Backend → S3) is slow, inefficient, and susceptible to network timeout failures, causing long waits for users.</li>
+            <li><strong>Tightly coupled architecture:</strong> The backend is responsible for both application logic and the data transfer, violating the Single Responsibility Principle and making the system fragile.</li>
+        </ul>
+
+        <h3 class="section-break">3. Proposed decoupled architecture</h3>
+        <p>The proposed solution is divided into two main parts that decouple the system: direct S3 upload and asynchronous background processing.</p>
+        
+        <h4>Part 1: Direct S3 upload with pre-signed URLs</h4>
+        <img src="assets/Proposed Workflow - Part 1.png" alt="Diagram of the proposed direct-to-S3 upload workflow">
+        <ol>
+            <li>The browser requests a secure, one-time upload URL from the backend, sending only file metadata.</li>
+            <li>The backend generates a <strong>pre-signed S3 URL</strong> and returns it to the browser.</li>
+            <li>The browser uploads the file <strong>directly to S3</strong> using the provided URL, bypassing our backend entirely.</li>
+            <li>Upon successful upload, the browser sends a small completion notification to the backend.</li>
+        </ol>
+        <h5>Justification</h5>
+        <ul>
+            <li><strong>Solves the bottleneck:</strong> The backend no longer handles large data streams and only manages lightweight JSON requests. The upload process leverages the massive scalability and high bandwidth of AWS S3.</li>
+            <li><strong>Improves performance:</strong> Uploads are significantly faster for the user as they go straight to AWS's high-bandwidth network.</li>
+            <li><strong>Enhances security:</strong> Pre-signed URLs are secure, as they are short-lived and narrowly scoped to a specific user and file.</li>
+        </ul>
+
+        <h4>Part 2: Asynchronous background processing</h4>
+        <img src="assets/Proposed Workflow - Part 2.png" alt="Sequence diagram of the asynchronous background processing workflow">
+        <ol>
+            <li>After notification of a successful upload, the backend <strong>publishes a task message</strong> to a queue (e.g., RabbitMQ or SQS).</li>
+            <li>A <strong>Celery Worker</strong> on a separate EC2 consumes the task from the queue.</li>
+            <li>The worker updates the job status in a central <strong>Database</strong> to "PROCESSING".</li>
+            <li>The worker downloads the file from S3, performs the intensive processing, and uploads the result back to S3.</li>
+            <li>Finally, the worker updates the job status in the Database to "COMPLETED" or "FAILED".</li>
+        </ol>
+        <h5>Justification</h5>
+        <ul>
+            <li><strong>Decoupling and resilience:</strong> The message queue completely decouples the web-facing backend from the processing tier. If the processing workers are down, tasks accumulate in the queue and are not lost.</li>
+            <li><strong>Scalability:</strong> The worker fleet can be placed in an Auto Scaling Group, configured to scale based on queue length or CPU usage. This is highly cost-effective as you only pay for processing power when you need it.</li>
+            <li><strong>Specialized hardware:</strong> The worker instances can be a different EC2 family (e.g., CPU-optimized) than the web servers, tailoring resources to the job.</li>
+        </ul>
+
+        <h4>Technology stack justification</h4>
+        <p>For background processing, a dedicated task queue is essential. While <code>async/await</code> is unsuitable for long-running, CPU-bound tasks like video transcoding, and <code>RQ</code> offers a simpler starting point, the combination of <strong>Celery</strong> with <strong>RabbitMQ</strong> is the recommended, industry-standard choice. This tandem provides a robust, feature-rich, and scalable foundation with superior tools for retries, monitoring, and durable task management, ensuring the system's long-term maintainability.</p>
+        
+        <h3 class="section-break">4. Conclusion</h3>
+        <p>
+            By shifting from a monolithic direct-upload model to a decoupled, two-part architecture, we solve the immediate stability crisis and build a foundation for a highly scalable and resilient system. The use of <strong>pre-signed S3 URLs</strong> eliminates the backend as an upload bottleneck, while a <strong>Celery-based</strong> asynchronous processing tier provides a robust, elastic, and maintainable solution for handling CPU-intensive background tasks. This architecture is more performant, more resilient, and more cost-effective.
+        </p>
+    </main>
+</body>
+</html>
